@@ -6,18 +6,19 @@ Streamlit app: Find US stocks that have fallen by ≥ X% from their 52-week high
 주의
 - NASDAQ/NYSE 심볼 파일은 data/ 폴더에 두어야 합니다.
   └ data/nasdaqlisted.txt
-  └ data/otherlisted.txt
+  └ data/otherlisted.txt   (현재 코드는 NASDAQ 파일만 사용)
 - 가격 데이터는 Yahoo Finance(yfinance)에서 불러옵니다.
 - 투자 조언이 아닙니다. 참고용으로만 사용하세요.
 """
 
 import io
+import time
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import streamlit as st
-from typing import List
+from typing import List, Dict, Any
 
 st.set_page_config(
     page_title="US Crash Finder (52W High Drawdown)",
@@ -38,7 +39,6 @@ def fetch_nasdaq_symbols_from_local() -> pd.DataFrame:
 
     nas.columns = [c.strip().lower() for c in nas.columns]
     return nas
-
 
 
 def _clean_symbol_df(nas: pd.DataFrame,
@@ -75,8 +75,6 @@ def _clean_symbol_df(nas: pd.DataFrame,
 
     df = df.drop_duplicates('symbol').sort_values('symbol').reset_index(drop=True)
     return df
-
-
 
 
 @st.cache_data(ttl=3*60*60, show_spinner=False)
@@ -133,12 +131,66 @@ def compute_drawdowns(px: pd.DataFrame) -> pd.DataFrame:
 
 
 # -----------------------------
+# Market Cap
+# -----------------------------
+
+def _get_single_market_cap(tkr: str) -> float:
+    """개별 티커 시가총액 조회. info → fast_info 순서로 시도."""
+    try:
+        # 우선 info (일부 케이스에서 더 신뢰도 높음)
+        info = yf.Ticker(tkr).info
+        mc = info.get("marketCap")
+        if isinstance(mc, (int, float)) and mc is not None:
+            return float(mc)
+    except Exception:
+        pass
+    try:
+        # fast_info fallback
+        finfo = yf.Ticker(tkr).fast_info
+        mc = getattr(finfo, "market_cap", None) if not isinstance(finfo, dict) else finfo.get("market_cap")
+        if isinstance(mc, (int, float)) and mc is not None:
+            return float(mc)
+    except Exception:
+        pass
+    return np.nan
+
+
+@st.cache_data(ttl=3*60*60, show_spinner=False)
+def fetch_market_caps(tickers: List[str]) -> pd.DataFrame:
+    """여러 티커의 시가총액을 조회하여 DataFrame으로 반환"""
+    rows = []
+    for i, tkr in enumerate(tickers, 1):
+        mc = _get_single_market_cap(tkr)
+        rows.append({"Ticker": tkr, "MarketCap": mc})
+        # 과도한 호출을 피하기 위해 아주 짧은 대기 (필요시 조정/제거)
+        time.sleep(0.01)
+    return pd.DataFrame(rows)
+
+
+def format_market_cap(x: Any) -> str:
+    """시가총액 보기 좋게 포맷"""
+    try:
+        v = float(x)
+    except Exception:
+        return ""
+    if np.isnan(v):
+        return ""
+    # 단위: K, M, B, T
+    units = [("T", 1_000_000_000_000), ("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)]
+    for u, base in units:
+        if abs(v) >= base:
+            return f"{v/base:.2f}{u}"
+    return f"{int(v):,}"
+
+
+# -----------------------------
 # Sidebar Controls
 # -----------------------------
 st.sidebar.header("필터")
 threshold = st.sidebar.slider("52주 고점 대비 하락률 (이상)", min_value=50, max_value=95, value=70, step=5)
 min_price = st.sidebar.number_input("최소 현재가 ($)", value=1.0, step=0.5)
-min_avgvol = st.sidebar.number_input("최소 평균 거래량 (60일)", value=50000, step=10000)
+min_avgvol = st.sidebar.number_input("최소 평균 거래량 (60일)", value=50_000, step=10_000)
+min_mcap = st.sidebar.number_input("최소 시가총액 ($)", value=1_000_000_000, step=100_000_000)  # ✅ 추가
 limit_scan = st.sidebar.number_input("스캔할 티커 수 제한 (0=무제한)", value=600, step=100)
 include_exchanges = st.sidebar.multiselect(
     "거래소 선택", options=["NASDAQ", "NYSE", "NYSE American"],
@@ -148,7 +200,7 @@ exclude_etfs = st.sidebar.checkbox("ETF/ETN 제외", value=True)
 st.sidebar.markdown("---")
 run_scan = st.sidebar.button("스캔 실행 🚀")
 
-st.title("미국 주식 대폭락 탐색기 (52주 고점 대비)")
+st.title("대폭락 미국주식 사냥꾼 (52주 고점 대비)")
 
 # -----------------------------
 # Main
@@ -162,7 +214,6 @@ if run_scan:
             st.stop()
         sym_df = _clean_symbol_df(nas, include_exchanges, exclude_etfs)
         st.write(f"심볼 수: {len(sym_df):,}")
-
 
     tickers = sym_df['symbol'].tolist()
     if limit_scan and limit_scan > 0:
@@ -183,23 +234,51 @@ if run_scan:
             st.stop()
 
     df = metrics.copy()
+
+    # 1) 기본 가격/거래량 필터
     df = df[(df['Last'] >= float(min_price))]
     if min_avgvol > 0 and 'AvgVol(60d)' in df.columns:
         df = df[(df['AvgVol(60d)'].fillna(0) >= float(min_avgvol))]
-    df = df[(df['Drawdown%'] <= -float(threshold))]
-    df = df.sort_values(['Drawdown%']).reset_index(drop=True)
 
-    st.subheader("후보 종목")
-    st.write(f"조건에 맞는 종목 수: {len(df):,}")
+    # 2) 드로우다운 필터
+    df = df[(df['Drawdown%'] <= -float(threshold))]
 
     if df.empty:
+        st.info("가격/거래량/드로우다운 조건에 해당하는 종목이 없습니다.")
+        st.stop()
+
+    # 3) ✅ 시가총액 조회 및 필터
+    with st.spinner("시가총액 조회 중…"):
+        mcaps = fetch_market_caps(df['Ticker'].tolist())
+    df = df.merge(mcaps, on="Ticker", how="left")
+
+    df = df[df["MarketCap"].fillna(0) >= float(min_mcap)]
+
+    if df.empty:
+        st.info("시가총액 조건에 해당하는 종목이 없습니다.")
+        st.stop()
+
+    # 정렬 및 표시용 포맷
+    df = df.sort_values(['Drawdown%']).reset_index(drop=True)
+
+    # 표시 컬럼
+    show_cols = ['Ticker', 'Last', '52W High', '52W Low',
+                 'Drawdown%', '1Y Return%', 'AvgVol(60d)', 'MarketCap']
+
+    # 보기 좋은 포맷으로 표시 (표시 전용)
+    df_display = df[show_cols].copy()
+    df_display['MarketCap'] = df_display['MarketCap'].apply(format_market_cap)
+
+    st.subheader("후보 종목")
+    st.write(f"조건에 맞는 종목 수: {len(df_display):,}")
+
+    if df_display.empty:
         st.info("조건에 해당하는 종목이 없습니다.")
         st.stop()
 
-    show_cols = ['Ticker', 'Last', '52W High', '52W Low',
-                 'Drawdown%', '1Y Return%', 'AvgVol(60d)']
-    st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+    st.dataframe(df_display, use_container_width=True, hide_index=True)
 
+    # CSV 다운로드 (원시 숫자 포함)
     csv = df[show_cols].to_csv(index=False).encode('utf-8')
     st.download_button("CSV 다운로드", csv, "crash_finder_results.csv", "text/csv")
 
