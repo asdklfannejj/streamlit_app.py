@@ -28,52 +28,38 @@ st.set_page_config(
 # Utilities
 # -----------------------------
 
-def fetch_symbol_directories_from_local() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """data/ 폴더에 있는 nasdaqlisted.txt, otherlisted.txt 불러오기"""
+def fetch_nasdaq_symbols_from_local() -> pd.DataFrame:
+    """data/ 폴더의 nasdaqlisted.txt만 불러오기 (otherlisted는 무시)"""
     nas = pd.read_csv("data/nasdaqlisted.txt", sep="|")
-    oth = pd.read_csv("data/otherlisted.txt", sep="|")
 
     # Footer 제거
     if nas.columns[-1].startswith("File Creation"):
         nas = nas.iloc[:-1]
-    if oth.columns[-1].startswith("File Creation"):
-        oth = oth.iloc[:-1]
 
     nas.columns = [c.strip().lower() for c in nas.columns]
-    oth.columns = [c.strip().lower() for c in oth.columns]
-    return nas, oth
+    return nas
 
 
-def _clean_symbol_df(nas: pd.DataFrame, oth: pd.DataFrame,
+
+def _clean_symbol_df(nas: pd.DataFrame,
                      include_exchanges: List[str], exclude_etfs: bool) -> pd.DataFrame:
-    """심볼 정리"""
+    """NASDAQ 심볼만 정리 (otherlisted 제거)"""
     nas = nas.copy()
     nas['exchange'] = 'NASDAQ'
 
-    exch_map = {"N": "NYSE", "A": "NYSE American", "P": "NYSE Arca"}
-    oth = oth.copy()
-    oth['exchange'] = oth['exchange'].map(exch_map).fillna(oth['exchange'])
-
-    # (핵심 수정) 먼저 컬럼명을 바꾼 다음, 바뀐 이름으로 선택합니다.
+    # 컬럼명 정리
     nas = nas.rename(columns={'security name': 'security_name'})
-    oth = oth.rename(columns={'security name': 'security_name', 'act symbol': 'symbol'})
 
-    # (안전 장치) 파일에 따라 'etf' 컬럼이 없을 수 있으므로, 있는 경우에만 포함합니다.
+    # 파일에 따라 'etf' 컬럼이 없을 수 있음 → 존재할 때만 포함
     nas_cols = ['symbol', 'security_name', 'exchange'] + (['etf'] if 'etf' in nas.columns else [])
-    oth_cols = ['symbol', 'security_name', 'exchange'] + (['etf'] if 'etf' in oth.columns else [])
-
-    nas_small = nas[nas_cols]
-    oth_small = oth[oth_cols]
-
-    # 합치기
-    df = pd.concat([nas_small, oth_small], ignore_index=True)
+    df = nas[nas_cols]
 
     # 정리
     df['symbol'] = df['symbol'].astype(str).str.strip()
     df['security_name'] = df['security_name'].astype(str)
     df['exchange'] = df['exchange'].astype(str)
 
-    # 거래소 필터
+    # 거래소 필터 (NASDAQ만 남아있지만, 사이드바 설정과 일치하도록 필터 유지)
     df = df[df['exchange'].isin(include_exchanges)]
 
     # ETF 제외
@@ -89,6 +75,7 @@ def _clean_symbol_df(nas: pd.DataFrame, oth: pd.DataFrame,
 
     df = df.drop_duplicates('symbol').sort_values('symbol').reset_index(drop=True)
     return df
+
 
 
 
@@ -167,13 +154,14 @@ st.title("미국 주식 대폭락 탐색기 (52주 고점 대비)")
 # Main
 # -----------------------------
 if run_scan:
-    with st.spinner("심볼 불러오는 중..."):
-        try:
-            nas, oth = fetch_symbol_directories_from_local()
-        except Exception as e:
-            st.error(f"심볼 파일 불러오기 실패: {e}")
-            st.stop()
-        sym_df = _clean_symbol_df(nas, oth, include_exchanges, exclude_etfs)
+   with st.spinner("심볼 불러오는 중..."):
+    try:
+        nas = fetch_nasdaq_symbols_from_local()
+    except Exception as e:
+        st.error(f"심볼 파일 불러오기 실패: {e}")
+        st.stop()
+    sym_df = _clean_symbol_df(nas, include_exchanges, exclude_etfs)
+
         st.write(f"심볼 수: {len(sym_df):,}")
 
     tickers = sym_df['symbol'].tolist()
