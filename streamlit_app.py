@@ -54,31 +54,42 @@ def _clean_symbol_df(nas: pd.DataFrame, oth: pd.DataFrame,
     oth = oth.copy()
     oth['exchange'] = oth['exchange'].map(exch_map).fillna(oth['exchange'])
 
-    nas_cols = ['symbol', 'security name', 'exchange', 'etf']
-    oth_cols = ['act symbol', 'security name', 'exchange', 'etf']
+    # (핵심 수정) 먼저 컬럼명을 바꾼 다음, 바뀐 이름으로 선택합니다.
+    nas = nas.rename(columns={'security name': 'security_name'})
+    oth = oth.rename(columns={'security name': 'security_name', 'act symbol': 'symbol'})
 
-    nas_small = nas.rename(columns={'security name':'security_name'})[nas_cols].rename(columns={'symbol':'symbol'})
-    oth_small = oth.rename(columns={'security name':'security_name', 'act symbol':'symbol'})[oth_cols].rename(columns={'act symbol':'symbol'})
+    # (안전 장치) 파일에 따라 'etf' 컬럼이 없을 수 있으므로, 있는 경우에만 포함합니다.
+    nas_cols = ['symbol', 'security_name', 'exchange'] + (['etf'] if 'etf' in nas.columns else [])
+    oth_cols = ['symbol', 'security_name', 'exchange'] + (['etf'] if 'etf' in oth.columns else [])
+
+    nas_small = nas[nas_cols]
+    oth_small = oth[oth_cols]
+
+    # 합치기
     df = pd.concat([nas_small, oth_small], ignore_index=True)
 
-    df['symbol'] = df['symbol'].str.strip()
+    # 정리
+    df['symbol'] = df['symbol'].astype(str).str.strip()
     df['security_name'] = df['security_name'].astype(str)
     df['exchange'] = df['exchange'].astype(str)
 
+    # 거래소 필터
     df = df[df['exchange'].isin(include_exchanges)]
 
+    # ETF 제외
     if exclude_etfs and 'etf' in df.columns:
         df = df[df['etf'] != 'Y']
 
+    # 워런트/권리/우선주 등 제거
     mask_bad = df['security_name'].str.contains(
         r"\b(WARRANT|RIGHTS|UNIT|PFD|PREFERRED|NOTE|BOND|DEPOSITARY|ETF)\b",
         case=False, regex=True,
     )
     df = df[~mask_bad]
 
-    df = df.drop_duplicates('symbol')
-    df = df.sort_values('symbol').reset_index(drop=True)
+    df = df.drop_duplicates('symbol').sort_values('symbol').reset_index(drop=True)
     return df
+
 
 
 @st.cache_data(ttl=3*60*60, show_spinner=False)
