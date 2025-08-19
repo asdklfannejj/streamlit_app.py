@@ -154,15 +154,15 @@ st.title("미국 주식 대폭락 탐색기 (52주 고점 대비)")
 # Main
 # -----------------------------
 if run_scan:
-   with st.spinner("심볼 불러오는 중..."):
-    try:
-        nas = fetch_nasdaq_symbols_from_local()
-    except Exception as e:
-        st.error(f"심볼 파일 불러오기 실패: {e}")
-        st.stop()
-    sym_df = _clean_symbol_df(nas, include_exchanges, exclude_etfs)
-
+    with st.spinner("심볼 불러오는 중..."):
+        try:
+            nas = fetch_nasdaq_symbols_from_local()
+        except Exception as e:
+            st.error(f"심볼 파일 불러오기 실패: {e}")
+            st.stop()
+        sym_df = _clean_symbol_df(nas, include_exchanges, exclude_etfs)
         st.write(f"심볼 수: {len(sym_df):,}")
+
 
     tickers = sym_df['symbol'].tolist()
     if limit_scan and limit_scan > 0:
